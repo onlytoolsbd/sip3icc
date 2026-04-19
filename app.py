@@ -6,6 +6,9 @@ from flask import Flask, request, jsonify
 from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
 import pyVoIP
 
+# Enable pyVoIP debugging to see SIP packets in Render logs
+pyVoIP.DEBUG = True
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -30,7 +33,8 @@ def start_sip_client():
             except:
                 pass
         
-        logger.info(f"Starting SIP registration for {SIP_USER}...")
+        logger.info(f"Initiating SIP for {SIP_USER}...")
+        # Use random source port to help bypass firewall/NAT restrictions
         phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, sipPort=0)
         phone.start()
 
@@ -54,63 +58,56 @@ def make_call():
     if not dest:
         return jsonify({"error": "Missing 'call' parameter"}), 400
 
-    logger.info(f"Request to call {dest}. Checking registration...")
+    logger.info(f"Fast Call Request to {dest}. Checking registration...")
 
-    # Aggressive Registration Wait: Wait up to 30 seconds for REGISTERED status
-    start_time = time.time()
-    while (time.time() - start_time) < 30:
-        status = phone._status if phone else None
-        
-        if status == PhoneStatus.REGISTERED:
+    # If disconnected or failed, trigger a start
+    if phone is None or phone._status in [PhoneStatus.FAILED, PhoneStatus.INACTIVE]:
+        start_sip_client()
+        time.sleep(2) # Brief wait for thread to start
+
+    # Wait for up to 10 seconds for REGISTERED
+    start_wait = time.time()
+    while (time.time() - start_wait) < 10:
+        if phone._status == PhoneStatus.REGISTERED:
+            logger.info("SIP Registered! Proceeding with call.")
             break
-            
-        if status in [None, PhoneStatus.FAILED, PhoneStatus.INACTIVE]:
-            logger.info("SIP not active, triggering immediate registration...")
-            threading.Thread(target=start_sip_client, daemon=True).start()
-            
-        logger.info(f"Waiting for registration... Current: {get_current_status()}")
-        time.sleep(2)
+        logger.info(f"Still {get_current_status()}... waiting...")
+        time.sleep(1.5)
 
-    # Final check after waiting
-    if not phone or phone._status != PhoneStatus.REGISTERED:
-        return jsonify({
-            "error": "Registration Timeout",
-            "current_status": get_current_status(),
-            "message": "The server is taking too long to register. Please try again."
-        }), 504
+    # Proceed even if still REGISTERING (Aggressive Mode)
+    status = phone._status
+    if status not in [PhoneStatus.REGISTERED, PhoneStatus.REGISTERING]:
+        return jsonify({"error": "SIP Client not ready", "status": get_current_status()}), 503
 
     try:
-        logger.info(f"SIP Registered! Initiating call to {dest}...")
+        logger.info(f"Executing call to {dest} (Current Status: {get_current_status()})")
         call = phone.call(dest)
         
         def monitor(c, d):
             m_start = time.time()
-            # Monitor for 90 seconds
-            while c.state != CallState.ENDED and (time.time() - m_start) < 90:
+            # Monitor for 60 seconds
+            while c.state != CallState.ENDED and (time.time() - m_start) < 60:
                 if c.state == CallState.ANSWERED:
-                    logger.info(f"Call {d} Answered. Hanging up in 1s.")
+                    logger.info(f"Call {d} ANSWERED. Hanging up in 1s.")
                     time.sleep(1)
                     c.hangup()
                     break
                 time.sleep(0.5)
-            try:
-                c.hangup()
-            except:
-                pass
-            logger.info(f"Monitor ended for {d}")
+            try: c.hangup()
+            except: pass
 
         threading.Thread(target=monitor, args=(call, dest), daemon=True).start()
         
         return jsonify({
             "message": f"Calling {dest}",
-            "status": "Initiated",
-            "registration": "OK"
+            "sip_status": get_current_status(),
+            "note": "Call attempted immediately"
         })
     except Exception as e:
-        logger.exception("Call initiation failed")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Call initiation failed: {e}")
+        return jsonify({"error": str(e), "status": get_current_status()}), 500
 
-# Initial start
+# Initial start on boot
 threading.Thread(target=start_sip_client, daemon=True).start()
 
 if __name__ == '__main__':
