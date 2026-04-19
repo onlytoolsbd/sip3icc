@@ -1,4 +1,0 @@
-flask
-pyVoIP
-audioop-lts
-gunicorn
