@@ -20,8 +20,9 @@ def get_phone(server, user, password):
     with phone_lock:
         if phone is None:
             logger.info(f"Initializing SIP Phone for {user}@{server}")
-            # Use myPort=0 to let the OS pick a random available port
-            phone = VoIPPhone(server, 5060, user, password, myPort=0)
+            # Correct parameter for source port in pyVoIP is sipPort
+            # Setting it to 0 should let the OS pick a random port
+            phone = VoIPPhone(server, 5060, user, password, sipPort=0)
             phone.start()
             
             # Wait for registration
