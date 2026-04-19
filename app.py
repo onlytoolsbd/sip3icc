@@ -5,107 +5,93 @@ import logging
 from flask import Flask, request, jsonify
 from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
 
-# Configure logging to see output in Render console
-logging.basicConfig(level=logging.INFO)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# SIP Globals
+# SIP Configuration
+SIP_SERVER = "sip.icctalk.com"
+SIP_USER = "09639187791"
+SIP_PASS = "okabye"
+
+# Global Phone Instance
 phone = None
 phone_lock = threading.Lock()
 
-def get_phone(server, user, password):
+def init_sip():
     global phone
     with phone_lock:
         if phone is None:
-            logger.info(f"Initializing SIP Phone for {user}@{server}")
-            # Correct parameter for source port in pyVoIP is sipPort
-            # Setting it to 0 should let the OS pick a random port
-            phone = VoIPPhone(server, 5060, user, password, sipPort=0)
-            phone.start()
-            
-            # Wait for registration
-            logger.info("Waiting for registration...")
-            for i in range(15):
-                if phone._status == PhoneStatus.REGISTERED:
-                    logger.info("SIP Registered successfully.")
-                    break
-                if phone._status == PhoneStatus.FAILED:
-                    logger.error("SIP Registration failed immediately.")
-                    break
-                time.sleep(1)
-        return phone
+            logger.info(f"Starting SIP client for {SIP_USER}@{SIP_SERVER}...")
+            try:
+                # sipPort=0 picks a random port, helping bypass some firewall blocks
+                phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, sipPort=0)
+                phone.start()
+                logger.info("SIP Thread started.")
+            except Exception as e:
+                logger.error(f"Failed to start SIP client: {e}")
+                phone = None
 
 @app.route('/')
 def index():
-    return "SIP API is running. Use /call?call=NUMBER to make a call."
+    status = "Unknown"
+    if phone:
+        status = str(phone._status).split('.')[-1]
+    return f"SIP API is active. Current Status: {status}. Use /call?call=NUMBER"
 
 @app.route('/call', methods=['GET', 'POST'])
 def make_call():
+    if request.method == 'POST' and request.is_json:
+        data = request.json
+    else:
+        data = request.args
+
+    destination = data.get('call') or data.get('destination')
+
+    if not destination:
+        return jsonify({"error": "Missing 'call' parameter"}), 400
+
+    if not phone or phone._status != PhoneStatus.REGISTERED:
+        current_status = str(phone._status).split('.')[-1] if phone else "None"
+        logger.warning(f"Call rejected: SIP not registered (Status: {current_status})")
+        return jsonify({"error": f"SIP not registered. Status: {current_status}"}), 503
+
     try:
-        # Try to get parameters from URL (GET) or JSON (POST)
-        if request.method == 'POST' and request.is_json:
-            data = request.json
-        else:
-            data = request.args
-
-        server = data.get('server', 'sip.icctalk.com')
-        username = data.get('username', '09639187791')
-        password = data.get('password', 'okabye')
-        destination = data.get('call') or data.get('destination')
-
-        if not destination:
-            return jsonify({"error": "Destination number is required. Use ?call=NUMBER"}), 400
-
-        logger.info(f"Request to call {destination}")
-        
-        p = get_phone(server, username, password)
-        
-        if p._status != PhoneStatus.REGISTERED:
-            status_str = str(p._status).split('.')[-1]
-            # If failed, reset for next attempt
-            if p._status == PhoneStatus.FAILED:
-                with phone_lock:
-                    p.stop()
-                    global phone
-                    phone = None
-            return jsonify({"error": f"SIP Registration status: {status_str}"}), 500
-
         logger.info(f"Initiating call to {destination}")
-        call = p.call(destination)
+        call = phone.call(destination)
         
-        # Background monitor for auto-hangup
         def monitor(target_call, dest):
-            logger.info(f"Monitor started for call to {dest}")
             start_time = time.time()
             try:
-                # Max 60 seconds monitor
-                while target_call.state != CallState.ENDED and (time.time() - start_time) < 60:
+                while target_call.state != CallState.ENDED and (time.time() - start_time) < 90:
                     if target_call.state == CallState.ANSWERED:
-                        logger.info(f"Call to {dest} ANSWERED. Hanging up in 1s...")
+                        logger.info(f"Call to {dest} ANSWERED. Hanging up in 1s.")
                         time.sleep(1)
                         target_call.hangup()
                         break
                     time.sleep(0.5)
                 
                 if target_call.state != CallState.ENDED:
-                    logger.info(f"Call to {dest} timed out after 60s. Hanging up.")
+                    logger.info(f"Call to {dest} timed out. Hanging up.")
                     target_call.hangup()
             except Exception as e:
-                logger.error(f"Monitor error: {e}")
+                logger.error(f"Monitor error for {dest}: {e}")
 
         threading.Thread(target=monitor, args=(call, destination), daemon=True).start()
         
-        return jsonify({
-            "message": f"Calling {destination}",
-            "status": "Initiated",
-            "sip_status": "REGISTERED"
-        })
+        return jsonify({"message": f"Calling {destination}", "status": "Initiated"})
 
     except Exception as e:
-        logger.exception("Unexpected error during /call")
+        logger.exception("Call failed")
         return jsonify({"error": str(e)}), 500
+
+# Start SIP registration in background immediately
+threading.Thread(target=init_sip, daemon=True).start()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
