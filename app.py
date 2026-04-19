@@ -1,12 +1,34 @@
-import time
-import socket
-import socks
-import random
-import threading
+import sys
 import os
-from flask import Flask, request, jsonify
-from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
-from datetime import datetime
+
+# Render.com এ লগগুলো যেন সাথে সাথে দেখা যায়, তাই output আনবাফার (unbuffered) করা হলো
+os.environ['PYTHONUNBUFFERED'] = '1'
+
+try:
+    print("Initializing application and loading modules...", flush=True)
+    import time
+    import socket
+    import socks
+    import random
+    import threading
+    from flask import Flask, request, jsonify
+    from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
+    from datetime import datetime
+    print("All modules loaded successfully!", flush=True)
+except Exception as e:
+    print(f"\nCRITICAL STARTUP ERROR: {e}", flush=True)
+    if "audioop" in str(e).lower():
+        print("=========================================================", flush=True)
+        print(" URGENT FIX NEEDED FOR RENDER.COM", flush=True)
+        print(" Python 3.13+ has removed the 'audioop' module.", flush=True)
+        print(" 'pyVoIP' requires this module to process audio.", flush=True)
+        print(" ", flush=True)
+        print(" SOLUTION: Go to Render Dashboard -> Environment tab", flush=True)
+        print(" Add a new Environment Variable:", flush=True)
+        print(" Key   : PYTHON_VERSION", flush=True)
+        print(" Value : 3.11.9", flush=True)
+        print("=========================================================\n", flush=True)
+    sys.exit(1)
 
 app = Flask(__name__)
 
