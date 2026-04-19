@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import logging
+import requests
 from flask import Flask, request, jsonify
 from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
 import pyVoIP
@@ -23,19 +24,31 @@ SIP_PASS = "okabye"
 # Global Phone Instance
 phone = None
 phone_lock = threading.Lock()
+public_ip = "0.0.0.0"
+
+def get_public_ip():
+    try:
+        # Try to get public IP to help with SIP NAT traversal
+        response = requests.get('https://api.ipify.org', timeout=5)
+        return response.text
+    except:
+        return "0.0.0.0"
 
 def start_sip_client():
-    global phone
+    global phone, public_ip
     with phone_lock:
         try:
             if phone:
-                logger.info("Stopping existing SIP client...")
                 phone.stop()
         except:
             pass
         
+        public_ip = get_public_ip()
+        logger.info(f"Detected Public IP: {public_ip}")
         logger.info(f"Starting SIP for {SIP_USER}...")
-        phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, sipPort=0)
+        
+        # Passing myIP=public_ip can help the SIP server route packets back to us
+        phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, myIP=public_ip, sipPort=0)
         phone.start()
 
 def get_current_status():
@@ -47,6 +60,7 @@ def index():
     return jsonify({
         "service": "SIP API",
         "status": get_current_status(),
+        "public_ip": public_ip,
         "usage": "/call?call=NUMBER"
     })
 
@@ -57,51 +71,54 @@ def make_call():
     if not dest:
         return jsonify({"error": "Missing 'call' parameter"}), 400
 
-    # Ensure phone is at least initializing
-    if phone is None or phone._status in [PhoneStatus.FAILED, PhoneStatus.INACTIVE]:
-        threading.Thread(target=start_sip_client, daemon=True).start()
-        time.sleep(1)
+    logger.info(f"Requesting call to {dest}. Waiting for registration...")
 
-    # ASYNCHRONOUS CALL INITIATION
-    # We move the blocking phone.call() to a background thread to prevent Gunicorn timeout
-    def background_call_task(target_dest):
-        try:
-            logger.info(f"Background thread: Starting call sequence to {target_dest}")
-            
-            # Wait up to 15 seconds for registration in the background
-            for _ in range(10):
-                if phone and phone._status == PhoneStatus.REGISTERED:
-                    break
-                time.sleep(1.5)
-            
-            logger.info(f"Background thread: Proceeding with call (Status: {get_current_status()})")
-            call = phone.call(target_dest)
-            
-            # Monitor the call
-            start_monitor = time.time()
-            while call.state != CallState.ENDED and (time.time() - start_monitor) < 90:
-                if call.state == CallState.ANSWERED:
-                    logger.info(f"Call {target_dest} Answered! Hanging up in 1s.")
+    # Force a restart if status is FAILED or NONE
+    if phone is None or phone._status in [PhoneStatus.FAILED, PhoneStatus.INACTIVE]:
+        start_sip_client()
+
+    # Wait for up to 25 seconds (blocking the browser request as requested)
+    start_wait = time.time()
+    while (time.time() - start_wait) < 25:
+        if phone and phone._status == PhoneStatus.REGISTERED:
+            break
+        logger.info(f"Waiting for registration... ({get_current_status()})")
+        time.sleep(2)
+
+    if not phone or phone._status != PhoneStatus.REGISTERED:
+        return jsonify({
+            "error": "Registration Timeout",
+            "current_status": get_current_status(),
+            "message": "SIP Server is not responding. This usually happens on Render's free tier due to UDP blocking."
+        }), 504
+
+    try:
+        logger.info(f"Registered! Initiating call to {dest}...")
+        call = phone.call(dest)
+        
+        # Background monitor for auto-hangup
+        def monitor(c, d):
+            m_start = time.time()
+            while c.state != CallState.ENDED and (time.time() - m_start) < 60:
+                if c.state == CallState.ANSWERED:
+                    logger.info(f"Call {d} Answered. Hanging up in 1s.")
                     time.sleep(1)
-                    call.hangup()
+                    c.hangup()
                     break
                 time.sleep(0.5)
-            
-            try: call.hangup()
+            try: c.hangup()
             except: pass
-            logger.info(f"Background thread: Call to {target_dest} finished.")
-            
-        except Exception as e:
-            logger.error(f"Background call error for {target_dest}: {e}")
 
-    # Launch the call task in the background and return immediately
-    threading.Thread(target=background_call_task, args=(dest,), daemon=True).start()
-
-    return jsonify({
-        "message": f"Call to {dest} has been queued",
-        "sip_status": get_current_status(),
-        "instruction": "The call will be attempted in the background. Check Render logs for progress."
-    })
+        threading.Thread(target=monitor, args=(call, dest), daemon=True).start()
+        
+        return jsonify({
+            "message": f"Calling {dest}",
+            "registration": "SUCCESS",
+            "status": "Initiated"
+        })
+    except Exception as e:
+        logger.error(f"Call failed: {e}")
+        return jsonify({"error": str(e), "status": get_current_status()}), 500
 
 # Start SIP on boot
 threading.Thread(target=start_sip_client, daemon=True).start()
