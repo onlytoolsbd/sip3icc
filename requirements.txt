@@ -2,3 +2,4 @@ flask
 pyVoIP
 audioop-lts
 gunicorn
+requests
