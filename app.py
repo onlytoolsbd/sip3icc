@@ -2,10 +2,12 @@ import os
 import time
 import threading
 import logging
-import requests
+import random
+import socket
 from flask import Flask, request, jsonify
 from pyVoIP.VoIP import VoIPPhone, CallState, PhoneStatus
 import pyVoIP
+import socks # From PySocks
 
 # Enable pyVoIP debugging
 pyVoIP.DEBUG = True
@@ -21,34 +23,47 @@ SIP_SERVER = "sip.icctalk.com"
 SIP_USER = "09639187791"
 SIP_PASS = "okabye"
 
+# SOCKS5 Proxy List (IP:PORT|USER|PASS)
+PROXIES = [
+    "203.95.220.218:1080|w8t|w8t",
+    "103.135.252.26:1080|w8t|w8t",
+    "103.151.169.187:1080|w8t|w8t",
+    "103.84.38.42:1080|w8t|w8t"
+]
+
 # Global Phone Instance
 phone = None
 phone_lock = threading.Lock()
-public_ip = "0.0.0.0"
+current_proxy = None
 
-def get_public_ip():
-    try:
-        # Try to get public IP to help with SIP NAT traversal
-        response = requests.get('https://api.ipify.org', timeout=5)
-        return response.text
-    except:
-        return "0.0.0.0"
+def setup_proxy():
+    global current_proxy
+    proxy_str = random.choice(PROXIES)
+    addr_part, user, pw = proxy_str.split('|')
+    host, port = addr_part.split(':')
+    
+    current_proxy = addr_part
+    logger.info(f"Connecting via SOCKS5 Proxy: {host}:{port} (User: {user})")
+    
+    # Monkey-patch socket to use SOCKS5
+    socks.set_default_proxy(socks.SOCKS5, host, int(port), True, user, pw)
+    socket.socket = socks.socksocket
 
 def start_sip_client():
-    global phone, public_ip
+    global phone
+    setup_proxy() # Select new random proxy on each start
+    
     with phone_lock:
         try:
             if phone:
+                logger.info("Stopping old SIP instance...")
                 phone.stop()
         except:
             pass
         
-        public_ip = get_public_ip()
-        logger.info(f"Detected Public IP: {public_ip}")
-        logger.info(f"Starting SIP for {SIP_USER}...")
-        
-        # Passing myIP=public_ip can help the SIP server route packets back to us
-        phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, myIP=public_ip, sipPort=0)
+        logger.info(f"Starting SIP for {SIP_USER} via Proxy...")
+        # CRITICAL FIX: myIP must be "0.0.0.0" on Render/Linux to avoid Errno 99
+        phone = VoIPPhone(SIP_SERVER, 5060, SIP_USER, SIP_PASS, myIP="0.0.0.0", sipPort=0)
         phone.start()
 
 def get_current_status():
@@ -58,9 +73,9 @@ def get_current_status():
 @app.route('/')
 def index():
     return jsonify({
-        "service": "SIP API",
+        "service": "SIP API with SOCKS5",
         "status": get_current_status(),
-        "public_ip": public_ip,
+        "proxy_in_use": current_proxy,
         "usage": "/call?call=NUMBER"
     })
 
@@ -71,35 +86,35 @@ def make_call():
     if not dest:
         return jsonify({"error": "Missing 'call' parameter"}), 400
 
-    logger.info(f"Requesting call to {dest}. Waiting for registration...")
+    logger.info(f"Request to call {dest}. Checking proxy registration...")
 
-    # Force a restart if status is FAILED or NONE
+    # Restart if failed or none
     if phone is None or phone._status in [PhoneStatus.FAILED, PhoneStatus.INACTIVE]:
         start_sip_client()
 
-    # Wait for up to 25 seconds (blocking the browser request as requested)
+    # Wait for up to 25 seconds
     start_wait = time.time()
     while (time.time() - start_wait) < 25:
         if phone and phone._status == PhoneStatus.REGISTERED:
             break
-        logger.info(f"Waiting for registration... ({get_current_status()})")
+        logger.info(f"Waiting for proxy registration... ({get_current_status()})")
         time.sleep(2)
 
     if not phone or phone._status != PhoneStatus.REGISTERED:
         return jsonify({
-            "error": "Registration Timeout",
+            "error": "Proxy/SIP Registration Timeout",
             "current_status": get_current_status(),
-            "message": "SIP Server is not responding. This usually happens on Render's free tier due to UDP blocking."
+            "proxy": current_proxy,
+            "message": "The proxy may not support UDP or the SIP server is unreachable."
         }), 504
 
     try:
-        logger.info(f"Registered! Initiating call to {dest}...")
+        logger.info(f"Initiating call to {dest} via Proxy...")
         call = phone.call(dest)
         
-        # Background monitor for auto-hangup
         def monitor(c, d):
             m_start = time.time()
-            while c.state != CallState.ENDED and (time.time() - m_start) < 60:
+            while c.state != CallState.ENDED and (time.time() - m_start) < 90:
                 if c.state == CallState.ANSWERED:
                     logger.info(f"Call {d} Answered. Hanging up in 1s.")
                     time.sleep(1)
@@ -112,15 +127,15 @@ def make_call():
         threading.Thread(target=monitor, args=(call, dest), daemon=True).start()
         
         return jsonify({
-            "message": f"Calling {dest}",
+            "message": f"Calling {dest} via SOCKS5",
             "registration": "SUCCESS",
-            "status": "Initiated"
+            "proxy": current_proxy
         })
     except Exception as e:
-        logger.error(f"Call failed: {e}")
+        logger.error(f"Proxy call failed: {e}")
         return jsonify({"error": str(e), "status": get_current_status()}), 500
 
-# Start SIP on boot
+# Start on boot
 threading.Thread(target=start_sip_client, daemon=True).start()
 
 if __name__ == '__main__':

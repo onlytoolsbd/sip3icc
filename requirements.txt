@@ -3,3 +3,4 @@ pyVoIP
 audioop-lts
 gunicorn
 requests
+PySocks
