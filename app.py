@@ -46,43 +46,68 @@ def log(msg):
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"[{timestamp}] {msg}", flush=True)
 
-def apply_random_proxy():
-    """লিস্ট থেকে র্যান্ডম প্রক্সি নিয়ে কানেকশন সেটআপ করে"""
-    try:
-        proxy_str = random.choice(PROXIES)
-        ip_port, user, pw = proxy_str.split('|')
-        ip, port = ip_port.split(':')
-        
-        # গ্লোবাল সকেট প্রক্সি সেট করা
-        socks.set_default_proxy(socks.SOCKS5, ip, int(port), True, user, pw)
-        socket.socket = socks.socksocket
-        log(f"Selected SOCKS5 Proxy: {ip}:{port}")
-    except Exception as e:
-        log(f"Failed to set Proxy: {str(e)}")
-
 def make_sip_call(dest):
-    """SIP কল করার ব্যাকগ্রাউন্ড টাস্ক"""
+    """SIP কল করার ব্যাকগ্রাউন্ড টাস্ক (অটো-রিট্রাই সহ)"""
     global phone_instance
-    try:
-        apply_random_proxy()
-        
-        if phone_instance:
-            try:
+    connected = False
+    
+    # প্রক্সি লিস্ট শাফেল করে নেওয়া হলো যাতে বারবার একই প্রক্সি ট্রাই না করে
+    max_attempts = min(3, len(PROXIES))
+    shuffled_proxies = random.sample(PROXIES, max_attempts)
+    
+    # --- PROXY RETRY LOOP ---
+    for attempt, proxy_str in enumerate(shuffled_proxies, 1):
+        try:
+            ip_port, user, pw = proxy_str.split('|')
+            ip, port = ip_port.split(':')
+            
+            log(f"=== Attempt {attempt}/{max_attempts} ===")
+            log(f"Setting SOCKS5 Proxy to: {ip}:{port}")
+            
+            # গ্লোবাল সকেট প্রক্সি সেট করা
+            socks.set_default_proxy(socks.SOCKS5, ip, int(port), True, user, pw)
+            socket.socket = socks.socksocket
+
+            if phone_instance:
+                try:
+                    phone_instance.stop()
+                except:
+                    pass
+
+            log("Registering to SIP Server...")
+            phone_instance = VoIPPhone("sip.icctalk.com", 5060, "09639187791", "okabye")
+            phone_instance.start()
+            
+            # রেজিস্ট্রেশনের জন্য অপেক্ষা
+            time.sleep(2)
+            
+            if phone_instance._status == PhoneStatus.REGISTERED:
+                log("Registration Successful!")
+                connected = True
+                break  # কানেক্ট হলে লুপ থেকে বের হয়ে যাবে
+            else:
+                log(f"Registration failed with status: {phone_instance._status}")
                 phone_instance.stop()
-            except:
-                pass
-        
-        log("Registering to SIP Server...")
-        phone_instance = VoIPPhone("sip.icctalk.com", 5060, "09639187791", "okabye")
-        phone_instance.start()
-        
-        # রেজিস্ট্রেশনের জন্য অপেক্ষা
-        time.sleep(2)
-        
-        if phone_instance._status != PhoneStatus.REGISTERED:
-            log("Failed to register SIP.")
-            return
-        
+                
+        except Exception as e:
+            log(f"Failed with proxy {ip}:{port} - Error: {str(e)}")
+            if phone_instance:
+                try:
+                    phone_instance.stop()
+                except:
+                    pass
+            time.sleep(1) # পরবর্তী প্রক্সি ট্রাই করার আগে ১ সেকেন্ড বিরতি
+
+    if not connected:
+        log("CRITICAL ERROR: All proxies failed or timed out.")
+        log("Hint: Make sure your SOCKS5 proxies support UDP traffic (UDP Associate).")
+        # প্রক্সি বাতিল করা হচ্ছে যাতে পরবর্তী কলগুলো স্টাক না হয়
+        socks.set_default_proxy()
+        socket.socket = socks.socksocket 
+        return
+
+    # --- CALL EXECUTION ---
+    try:
         log(f"Successfully registered. Calling: {dest}")
         call = phone_instance.call(dest)
         
@@ -108,7 +133,12 @@ def make_sip_call(dest):
         phone_instance.stop()
         
     except Exception as e:
-        log(f"Error during call: {str(e)}")
+        log(f"Error during call execution: {str(e)}")
+        if phone_instance:
+            try:
+                phone_instance.stop()
+            except:
+                pass
 
 @app.route('/')
 def index():
