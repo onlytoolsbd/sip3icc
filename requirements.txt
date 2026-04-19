@@ -1,6 +1,3 @@
-flask
-pyVoIP
-audioop-lts
-gunicorn
-requests
-PySocks
+Flask==3.0.3
+pyVoIP==1.6.4
+PySocks==1.7.1
