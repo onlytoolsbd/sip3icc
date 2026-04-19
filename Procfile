@@ -1,1 +1,1 @@
-web: gunicorn app:app
+python patch_sip.py && gunicorn app:app
