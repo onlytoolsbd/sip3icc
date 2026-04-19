@@ -23,23 +23,36 @@ def get_phone(server, user, password):
 
 @app.route('/')
 def index():
-    return "SIP API is running. Use /call to make a call."
+    return "SIP API is running. Use /call?call=NUMBER to make a call."
 
-@app.route('/call', methods=['POST'])
+@app.route('/call', methods=['GET', 'POST'])
 def make_call():
-    data = request.json
+    # Try to get parameters from URL (GET) or JSON (POST)
+    if request.method == 'POST' and request.is_json:
+        data = request.json
+    else:
+        data = request.args
+
     server = data.get('server', 'sip.icctalk.com')
     username = data.get('username', '09639187791')
     password = data.get('password', 'okabye')
-    destination = data.get('destination')
+    destination = data.get('call') or data.get('destination')
 
     if not destination:
-        return jsonify({"error": "Destination number is required"}), 400
+        return jsonify({"error": "Destination number is required. Use ?call=NUMBER"}), 400
 
     try:
         p = get_phone(server, username, password)
         if p._status != PhoneStatus.REGISTERED:
-            return jsonify({"error": "SIP Registration failed", "status": str(p._status)}), 500
+            # Try to restart if failed
+            if p._status == PhoneStatus.FAILED:
+                p.stop()
+                global phone
+                phone = None
+                p = get_phone(server, username, password)
+            
+            if p._status != PhoneStatus.REGISTERED:
+                return jsonify({"error": f"SIP Registration failed: {p._status}"}), 500
 
         call = p.call(destination)
         
@@ -55,12 +68,15 @@ def make_call():
 
         threading.Thread(target=monitor, daemon=True).start()
         
-        return jsonify({"message": f"Calling {destination}", "status": "Initiated"})
+        return jsonify({
+            "message": f"Calling {destination}",
+            "status": "Initiated",
+            "auto_hangup": "Enabled"
+        })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Use environment variable for port (Render requirement)
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
