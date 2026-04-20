@@ -1,0 +1,37 @@
+{
+    "admin_password": "admin",
+    "default_server": "sip.icctalk.com",
+    "accounts": [
+        {
+            "server": "sip.icctalk.com",
+            "username": "09639152718",
+            "password": "asdfg@718"
+        },
+        {
+            "server": "sip.icctalk.com",
+            "username": "09639137287",
+            "password": "137287"
+        },
+        {
+            "server": "sip.icctalk.com",
+            "username": "09639137205",
+            "password": "asdfg@205"
+        },
+        {
+            "server": "sip.icctalk.com",
+            "username": "09639153285",
+            "password": "J#445Hg3@jb4"
+        },
+        {
+            "server": "sip.icctalk.com",
+            "username": "09639187791",
+            "password": "okabye"
+        }
+    ],
+    "proxies": [
+        "203.95.220.218:1080|w8t|w8t",
+        "103.135.252.26:1080|w8t|w8t",
+        "103.151.169.187:1080|w8t|w8t",
+        "103.84.38.42:1080|w8t|w8t"
+    ]
+}
